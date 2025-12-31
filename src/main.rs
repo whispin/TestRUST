@@ -18,8 +18,8 @@ use tokio::net::TcpStream; // TcpStream async dari Tokio
 use tokio_native_tls::TlsConnector as TokioTlsConnector; // Konektor TLS async
 use tokio_postgres::NoTls;
 
-const IP_RESOLVER: &str = "speed.cloudflare.com";
-const PATH_RESOLVER: &str = "/meta";
+const IP_RESOLVER: &str = "api.ipify.org";
+const PATH_RESOLVER: &str = "/?format=json";
 const PROXY_FILE: &str = "Data/emeliaProxyIP15AGS.txt"; //input
 const OUTPUT_FILE: &str = "Data/alive.txt";
 const COUNTRY_DB: &str = "Data/GeoLite2-Country.mmdb";
@@ -115,13 +115,16 @@ async fn main() -> Result<()> {
         }
     };
 
-    let original_ip = match original_ip_data.get("clientIp") {
-        Some(Value::String(ip)) => ip.clone(),
-        _ => {
+    // 支持多种 IP 检测服务的响应格式
+    let original_ip = original_ip_data.get("clientIp")  // speed.cloudflare.com
+        .or_else(|| original_ip_data.get("ip"))          // api.ipify.org
+        .or_else(|| original_ip_data.get("origin"))      // httpbin.org
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
             eprintln!("Failed to extract original client IP from response: {:?}", original_ip_data);
-            return Err("Failed to extract original client IP".into());
-        }
-    };
+            "Failed to extract original client IP"
+        })?;
 
     println!("Original IP: {}", original_ip);
 
