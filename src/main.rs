@@ -25,7 +25,6 @@ const OUTPUT_FILE: &str = "Data/alive.txt";
 const COUNTRY_DB: &str = "Data/GeoLite2-Country.mmdb";
 const CITY_DB: &str = "Data/GeoLite2-City.mmdb";
 const ASN_DB: &str = "Data/GeoLite2-ASN.mmdb";
-const ANONYMOUS_IP_DB: &str = "Data/GeoIP2-Anonymous-IP.mmdb";
 const ABUSE_IP_FILE: &str = "Data/abuseips.txt";
 const FIREHOL_CIDR_FILE: &str = "Data/firehol_cidr.txt";
 const MAX_CONCURRENT: usize = 175;
@@ -83,17 +82,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Initialize Anonymous IP database reader (optional)
-    let anonymous_reader = match Reader::open_readfile(ANONYMOUS_IP_DB) {
-        Ok(reader) => {
-            println!("Loaded Anonymous IP database: {}", ANONYMOUS_IP_DB);
-            Some(Arc::new(reader))
-        }
-        Err(e) => {
-            eprintln!("Warning: Could not load Anonymous IP database ({}): {}. Anonymous IP filtering will be disabled.", ANONYMOUS_IP_DB, e);
-            None
-        }
-    };
 
     // Load AbuseIPDB blacklist
     let abuse_ips = Arc::new(load_abuse_ips(ABUSE_IP_FILE));
@@ -661,38 +649,6 @@ fn get_asn_info(
     }
 }
 
-// 检查 IP 是否为匿名代理（VPN/公共代理/Tor）
-fn is_anonymous_ip(
-    anonymous_reader: &Reader<Vec<u8>>,
-    ip_str: &str,
-) -> (bool, String) {
-    let ip: IpAddr = match ip_str.parse() {
-        Ok(ip) => ip,
-        Err(_) => return (false, "无法解析IP".to_string()),
-    };
-
-    match anonymous_reader.lookup::<geoip2::AnonymousIp>(ip) {
-        Ok(anonymous_data) => {
-            let is_vpn = anonymous_data.is_anonymous_vpn.unwrap_or(false);
-            let is_proxy = anonymous_data.is_public_proxy.unwrap_or(false);
-            let is_tor = anonymous_data.is_tor_exit_node.unwrap_or(false);
-
-            if is_vpn || is_proxy || is_tor {
-                let mut reasons = Vec::new();
-                if is_vpn { reasons.push("VPN"); }
-                if is_proxy { reasons.push("公共代理"); }
-                if is_tor { reasons.push("Tor出口节点"); }
-                (true, reasons.join("+"))
-            } else {
-                (false, "正常IP".to_string())
-            }
-        }
-        Err(_) => {
-            // 数据库中没有记录，视为正常IP（不在匿名IP列表中）
-            (false, "未知(默认允许)".to_string())
-        }
-    }
-}
 
 async fn process_proxy(
     proxy_line: String,
@@ -740,16 +696,6 @@ async fn process_proxy(
                             return;
                         }
                     };
-
-                    // 检查是否为匿名IP（VPN/公共代理/Tor）- 仅当数据库可用时
-                    if let Some(anon_reader) = anonymous_reader {
-                        let (is_anonymous, _reason) = is_anonymous_ip(anon_reader, ip);
-
-                        if is_anonymous {
-                            //println!("CF PROXY FILTERED 🚫 (匿名IP: {}): {}:{}", reason, ip, port_num);
-                            return;
-                        }
-                    }
 
                     // 检查是否在 AbuseIPDB 黑名单中
                     if !abuse_ips.is_empty() && abuse_ips.contains(&ip_addr) {
