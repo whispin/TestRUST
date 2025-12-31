@@ -18,8 +18,8 @@ use tokio::net::TcpStream; // TcpStream async dari Tokio
 use tokio_native_tls::TlsConnector as TokioTlsConnector; // Konektor TLS async
 use tokio_postgres::NoTls;
 
-const IP_RESOLVER: &str = "httpbin.org";
-const PATH_RESOLVER: &str = "/ip";
+const IP_RESOLVER: &str = "www.cloudflare.com";
+const PATH_RESOLVER: &str = "/cdn-cgi/trace";
 const PROXY_FILE: &str = "Data/emeliaProxyIP15AGS.txt"; //input
 const OUTPUT_FILE: &str = "Data/alive.txt";
 const COUNTRY_DB: &str = "Data/GeoLite2-Country.mmdb";
