@@ -168,7 +168,6 @@ async fn main() -> Result<()> {
             let country_reader = Arc::clone(&country_reader);
             let city_reader = city_reader.clone();
             let asn_reader = asn_reader.clone();
-            let anonymous_reader = anonymous_reader.clone();
             let abuse_ips = Arc::clone(&abuse_ips);
             let firehol_cidrs = Arc::clone(&firehol_cidrs);
 
@@ -192,7 +191,6 @@ async fn main() -> Result<()> {
                     &country_reader,
                     city_reader.as_deref(),
                     asn_reader.as_deref(),
-                    anonymous_reader.as_deref(),
                     &abuse_ips,
                     &firehol_cidrs,
                 ).await;
@@ -661,7 +659,6 @@ async fn process_proxy(
     country_reader: &Reader<Vec<u8>>,
     city_reader: Option<&Reader<Vec<u8>>>,
     asn_reader: Option<&Reader<Vec<u8>>>,
-    anonymous_reader: Option<&Reader<Vec<u8>>>,
     abuse_ips: &HashSet<IpAddr>,
     firehol_cidrs: &[IpNetwork],
 ) {
