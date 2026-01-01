@@ -523,15 +523,29 @@ async fn check_connection(
         if let Some(body_start) = response_str.find("\r\n\r\n") {
             let body = &response_str[body_start + 4..];
 
-            // Try to parse the JSON body
-            match serde_json::from_str::<Value>(body.trim()) {
-                Ok(json_data) => Ok(json_data),
-                Err(e) => {
-                    eprintln!("Failed to parse JSON: {}", e);
-                    eprintln!("Response body for {}:{}: {}", host, proxy.map_or_else(|| "direct".to_string(), |(ip,p)| format!("{}:{}",ip,p)), body);
-                    Err("Invalid JSON response".into())
+            // 尝试解析为 JSON（兼容 httpbin.org 等服务）
+            if let Ok(json_data) = serde_json::from_str::<Value>(body.trim()) {
+                return Ok(json_data);
+            }
+
+            // 解析 Cloudflare trace 格式 (key=value)
+            let mut map = serde_json::Map::new();
+            for line in body.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    map.insert(key.to_string(), Value::String(value.to_string()));
                 }
             }
+
+            if !map.is_empty() {
+                return Ok(Value::Object(map));
+            }
+
+            // 只有两种格式都解析失败时才报错
+            eprintln!("Failed to parse response body for {}:{}: {}", 
+                host, 
+                proxy.map_or_else(|| "direct".to_string(), |(ip,p)| format!("{}:{}",ip,p)), 
+                body);
+            Err("Invalid response format".into())
         } else {
             Err("Invalid HTTP response: No separator found".into())
         }
@@ -686,7 +700,13 @@ async fn process_proxy(
 
     match check_connection(IP_RESOLVER, PATH_RESOLVER, Some((ip, port_num))).await {
         Ok(proxy_data) => {
-            if let Some(Value::String(proxy_ip)) = proxy_data.get("clientIp") {
+            // 支持多种格式: clientIp (speed.cloudflare.com), ip (cloudflare trace), origin (httpbin)
+            let proxy_ip = proxy_data.get("clientIp")
+                .or_else(|| proxy_data.get("ip"))
+                .or_else(|| proxy_data.get("origin"))
+                .and_then(|v| v.as_str());
+
+            if let Some(proxy_ip) = proxy_ip {
                 if proxy_ip != original_ip {
                     // 解析 IP 地址用于过滤检查
                     let ip_addr = match ip.parse::<IpAddr>() {
