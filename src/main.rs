@@ -1,3 +1,5 @@
+mod postgres_tls;
+
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
@@ -12,11 +14,12 @@ use futures::StreamExt;
 use ipnetwork::IpNetwork;
 use maxminddb::{geoip2, Reader};
 use native_tls::TlsConnector as NativeTlsConnector; // Renamed to avoid conflict
+use postgres_tls::PostgresNativeTlsConnector;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Untuk read_exact, write_all async
 use tokio::net::TcpStream; // TcpStream async dari Tokio
 use tokio_native_tls::TlsConnector as TokioTlsConnector; // Konektor TLS async
-use tokio_postgres::NoTls;
+use tokio_postgres::config::SslMode;
 
 const IP_RESOLVER: &str = "www.cloudflare.com";
 const PATH_RESOLVER: &str = "/cdn-cgi/trace";
@@ -313,6 +316,20 @@ fn is_ip_in_cidr_list(ip: IpAddr, cidrs: &[IpNetwork]) -> bool {
 }
 
 // 初始化 PostgreSQL 连接池（必需）
+fn build_pg_tls_connector(database_url: &str) -> Result<PostgresNativeTlsConnector> {
+    let pg_config = database_url.parse::<tokio_postgres::Config>()?;
+    let mut builder = NativeTlsConnector::builder();
+
+    if matches!(pg_config.get_ssl_mode(), SslMode::Prefer | SslMode::Require) {
+        // 与 libpq / Aiven 文档中的 sslmode=require 语义保持一致：强制加密，但不验证服务端证书。
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+    }
+
+    let native_connector = builder.build()?;
+    Ok(PostgresNativeTlsConnector::new(native_connector))
+}
+
 fn create_pg_pool() -> Result<Pool> {
     let database_url = match env::var("DATABASE_URL") {
         Ok(url) => {
@@ -328,12 +345,13 @@ fn create_pg_pool() -> Result<Pool> {
     };
 
     let mut cfg = Config::new();
+    let tls_connector = build_pg_tls_connector(&database_url)?;
     cfg.url = Some(database_url);
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
 
-    match cfg.create_pool(Some(Runtime::Tokio1), NoTls) {
+    match cfg.create_pool(Some(Runtime::Tokio1), tls_connector) {
         Ok(pool) => {
             println!("✅ PostgreSQL connection pool created successfully");
             Ok(pool)
@@ -806,5 +824,27 @@ async fn process_proxy(
         Err(_e) => {
            // println!("CF PROXY DEAD ⏱️ (Error connecting): {}:{} - {}", ip, port_num, _e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pg_pool_can_get_client_with_tls_database_url() {
+        if env::var("DATABASE_URL").is_err() {
+            eprintln!("Skipping TLS database test because DATABASE_URL is not set.");
+            return;
+        }
+
+        let pool = create_pg_pool().expect("expected PostgreSQL pool to be created");
+        let client_result = pool.get().await;
+
+        assert!(
+            client_result.is_ok(),
+            "expected pool.get() to succeed for TLS-enabled PostgreSQL, got {:?}",
+            client_result.err()
+        );
     }
 }
