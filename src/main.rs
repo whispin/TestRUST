@@ -32,6 +32,18 @@ const ABUSE_IP_FILE: &str = "Data/abuseips.txt";
 const FIREHOL_CIDR_FILE: &str = "Data/firehol_cidr.txt";
 const MAX_CONCURRENT: usize = 175;
 const TIMEOUT_SECONDS: u64 = 9;
+const EXPECTED_PROXIES_PRIMARY_KEY: [&str; 2] = ["ip", "port"];
+const EXPECTED_PROXIES_COLUMNS: [(&str, &str, bool); 9] = [
+    ("ip", "text", false),
+    ("port", "integer", false),
+    ("country_code", "text", true),
+    ("country_name", "text", true),
+    ("city_code", "text", true),
+    ("city_name", "text", true),
+    ("asn_number", "text", true),
+    ("org_name", "text", true),
+    ("updated_at", "timestamp with time zone", false),
+];
 
 // Define a custom error type that implements Send + Sync
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -148,6 +160,11 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    if let Err(e) = ensure_proxies_table_schema(&pg_pool).await {
+        eprintln!("❌ Failed to ensure proxies table schema: {}", e);
+        std::process::exit(1);
+    }
 
     // Test database connection (REQUIRED)
     if let Err(e) = test_database_connection(&pg_pool).await {
@@ -362,6 +379,135 @@ fn create_pg_pool() -> Result<Pool> {
     }
 }
 
+fn is_expected_proxies_schema(
+    actual_columns: &[(String, String, bool)],
+    primary_key_columns: &[String],
+) -> bool {
+    if primary_key_columns.len() != EXPECTED_PROXIES_PRIMARY_KEY.len() {
+        return false;
+    }
+
+    if actual_columns.len() != EXPECTED_PROXIES_COLUMNS.len() {
+        return false;
+    }
+
+    let primary_key_matches = primary_key_columns
+        .iter()
+        .zip(EXPECTED_PROXIES_PRIMARY_KEY.iter())
+        .all(|(actual, expected)| actual == expected);
+
+    let columns_match = actual_columns
+        .iter()
+        .zip(EXPECTED_PROXIES_COLUMNS.iter())
+        .all(|((actual_name, actual_type, actual_nullable), (expected_name, expected_type, expected_nullable))| {
+            actual_name == expected_name
+                && actual_type == expected_type
+                && actual_nullable == expected_nullable
+        });
+
+    primary_key_matches && columns_match
+}
+
+async fn ensure_proxies_table_schema(pool: &Pool) -> Result<()> {
+    println!("🧱 Ensuring proxies table schema...");
+
+    let mut client = pool.get().await?;
+    let table_exists = client
+        .query_one(
+            "SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_name = 'proxies'
+            )",
+            &[],
+        )
+        .await?;
+    let table_exists: bool = table_exists.get(0);
+
+    if table_exists {
+        let actual_columns = client
+            .query(
+                "SELECT column_name, data_type, is_nullable
+                 FROM information_schema.columns
+                 WHERE table_name = 'proxies'
+                 ORDER BY ordinal_position",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                let name: String = row.get(0);
+                let data_type: String = row.get(1);
+                let is_nullable: String = row.get(2);
+                (name, data_type, is_nullable == "YES")
+            })
+            .collect::<Vec<_>>();
+
+        let primary_key_columns = client
+            .query(
+                "SELECT kcu.column_name
+                 FROM information_schema.table_constraints tc
+                 JOIN information_schema.key_column_usage kcu
+                   ON tc.constraint_name = kcu.constraint_name
+                  AND tc.table_schema = kcu.table_schema
+                 WHERE tc.table_name = 'proxies'
+                   AND tc.constraint_type = 'PRIMARY KEY'
+                 ORDER BY kcu.ordinal_position",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>();
+
+        if is_expected_proxies_schema(&actual_columns, &primary_key_columns) {
+            println!("✅ proxies table schema matches expected structure");
+            return Ok(());
+        }
+
+        eprintln!("⚠️ proxies table schema mismatch detected; dropping and recreating table");
+        let transaction = client.transaction().await?;
+        transaction.execute("DROP TABLE IF EXISTS proxies", &[]).await?;
+        transaction
+            .batch_execute(
+                "CREATE TABLE proxies (
+                    ip TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    country_code TEXT,
+                    country_name TEXT,
+                    city_code TEXT,
+                    city_name TEXT,
+                    asn_number TEXT,
+                    org_name TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    PRIMARY KEY (ip, port)
+                )",
+            )
+            .await?;
+        transaction.commit().await?;
+        println!("✅ proxies table recreated with expected schema");
+        return Ok(());
+    }
+
+    client
+        .batch_execute(
+            "CREATE TABLE proxies (
+                ip TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                country_code TEXT,
+                country_name TEXT,
+                city_code TEXT,
+                city_name TEXT,
+                asn_number TEXT,
+                org_name TEXT,
+                updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (ip, port)
+            )",
+        )
+        .await?;
+    println!("✅ proxies table created with expected schema");
+    Ok(())
+}
+
 // 测试数据库连接并验证表结构
 async fn test_database_connection(pool: &Pool) -> Result<()> {
     println!("🔍 Testing database connection...");
@@ -373,30 +519,13 @@ async fn test_database_connection(pool: &Pool) -> Result<()> {
 
     println!("✅ Database connection successful");
 
-    // Check if proxies table exists
-    let table_check = client.query(
-        "SELECT EXISTS (
-            SELECT FROM information_schema.tables
-            WHERE table_name = 'proxies'
-        )",
-        &[]
-    ).await?;
+    println!("✅ Table 'proxies' exists");
 
-    if let Some(row) = table_check.first() {
-        let exists: bool = row.get(0);
-        if exists {
-            println!("✅ Table 'proxies' exists");
-
-            // Get row count
-            let count_result = client.query("SELECT COUNT(*) FROM proxies", &[]).await?;
-            if let Some(row) = count_result.first() {
-                let count: i64 = row.get(0);
-                println!("📊 Current proxy count in database: {}", count);
-            }
-        } else {
-            eprintln!("❌ Table 'proxies' does not exist! Please run schema.sql first.");
-            return Err("Table 'proxies' not found".into());
-        }
+    // Get row count
+    let count_result = client.query("SELECT COUNT(*) FROM proxies", &[]).await?;
+    if let Some(row) = count_result.first() {
+        let count: i64 = row.get(0);
+        println!("📊 Current proxy count in database: {}", count);
     }
 
     Ok(())
@@ -845,6 +974,46 @@ mod tests {
             client_result.is_ok(),
             "expected pool.get() to succeed for TLS-enabled PostgreSQL, got {:?}",
             client_result.err()
+        );
+    }
+
+    #[test]
+    fn schema_mismatch_when_updated_at_or_primary_key_is_missing() {
+        let actual_columns = vec![
+            ("ip".to_string(), "text".to_string(), false),
+            ("port".to_string(), "integer".to_string(), false),
+            ("country_code".to_string(), "text".to_string(), true),
+            ("country_name".to_string(), "text".to_string(), true),
+            ("city_code".to_string(), "text".to_string(), true),
+            ("city_name".to_string(), "text".to_string(), true),
+            ("asn_number".to_string(), "text".to_string(), true),
+            ("org_name".to_string(), "text".to_string(), true),
+        ];
+
+        let primary_key_columns = vec!["ip".to_string(), "port".to_string()];
+
+        assert!(
+            !is_expected_proxies_schema(&actual_columns, &primary_key_columns),
+            "schema without updated_at should be treated as mismatched"
+        );
+    }
+
+    #[test]
+    fn schema_matches_when_columns_and_primary_key_are_expected() {
+        let actual_columns = EXPECTED_PROXIES_COLUMNS
+            .iter()
+            .map(|(name, data_type, nullable)| {
+                (name.to_string(), data_type.to_string(), *nullable)
+            })
+            .collect::<Vec<_>>();
+        let primary_key_columns = EXPECTED_PROXIES_PRIMARY_KEY
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(
+            is_expected_proxies_schema(&actual_columns, &primary_key_columns),
+            "schema identical to expected structure should be accepted"
         );
     }
 }
