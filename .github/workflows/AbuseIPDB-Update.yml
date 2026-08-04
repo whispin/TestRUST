@@ -3,8 +3,7 @@ name: AbuseIPDB Blacklist Update
 on:
   workflow_dispatch: # Allow manual trigger
   schedule:
-    - cron: '30 5,11,17,23 * * *'  # Run at 5:30, 11:30, 17:30, 23:30 UTC daily
-
+    - cron: '0 17 * * *'
 jobs:
   update-blacklist:
     runs-on: ubuntu-latest
